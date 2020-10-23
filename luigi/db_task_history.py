@@ -56,9 +56,6 @@ Base = sqlalchemy.ext.declarative.declarative_base()
 
 logger = logging.getLogger('luigi-interface')
 
-config = configuration.get_config()
-TS_TYPE = DATETIME2 if "mssql" in config.get("task_history", "db_connection", "") else sqlalchemy.TIMESTAMP
-
 
 class DbTaskHistory(task_history.TaskHistory):
     """
@@ -244,7 +241,15 @@ class TaskEvent(Base):
     id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
     task_id = sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey('tasks.id'), index=True)
     event_name = sqlalchemy.Column(sqlalchemy.String(20))
-    ts = sqlalchemy.Column(TS_TYPE, index=True, nullable=False)
+    ts = sqlalchemy.Column(
+        (
+            DATETIME2
+            if "mssql" in configuration.get_config().get("task_history", "db_connection", "")
+            else sqlalchemy.TIMESTAMP
+        ),
+        index=True,
+        nullable=False,
+    )
 
     def __repr__(self):
         return "TaskEvent(task_id=%s, event_name=%s, ts=%s" % (self.task_id, self.event_name, self.ts)
