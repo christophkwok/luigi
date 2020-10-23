@@ -45,13 +45,19 @@ from luigi import task_history
 from luigi.task_status import DONE, FAILED, PENDING, RUNNING
 
 import sqlalchemy
+from sqlalchemy import func, and_
 import sqlalchemy.ext.declarative
 import sqlalchemy.orm
 import sqlalchemy.orm.collections
 from sqlalchemy.engine import reflection
+from sqlalchemy.dialects.mssql import DATETIME2
+
 Base = sqlalchemy.ext.declarative.declarative_base()
 
 logger = logging.getLogger('luigi-interface')
+
+config = configuration.get_config()
+TS_TYPE = DATETIME2 if "mssql" in config.get("task_history", "db_connection", "") else sqlalchemy.TIMESTAMP
 
 
 class DbTaskHistory(task_history.TaskHistory):
@@ -157,14 +163,43 @@ class DbTaskHistory(task_history.TaskHistory):
         """
         Return tasks that have been updated in the past 24 hours.
         """
-        with self._session(session) as session:
-            yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
-            return session.query(TaskRecord).\
-                join(TaskEvent).\
-                filter(TaskEvent.ts >= yesterday).\
-                group_by(TaskRecord.id, TaskEvent.event_name, TaskEvent.ts).\
-                order_by(TaskEvent.ts.desc()).\
-                all()
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+
+        if "mssql" in self.engine.dialect.name:
+            with self._session(session) as session:
+                subq_task_events_max_dates = (
+                    session.query(TaskEvent.task_id, func.max(TaskEvent.ts).label("last_action"))
+                    .group_by(TaskEvent.task_id)
+                    .subquery()
+                )
+
+                subq_task_events_max_dates_w_names = (
+                    session.query(TaskEvent.task_id, TaskEvent.ts, TaskEvent.event_name)
+                    .join(
+                        subq_task_events_max_dates,
+                        and_(
+                            TaskEvent.task_id == subq_task_events_max_dates.c.task_id,
+                            TaskEvent.ts == subq_task_events_max_dates.c.last_action,
+                        ),
+                    )
+                    .subquery()
+                )
+
+                return (
+                    session.query(TaskRecord)
+                    .join(subq_task_events_max_dates_w_names)
+                    .filter(subq_task_events_max_dates_w_names.c.ts >= yesterday)
+                    .order_by(subq_task_events_max_dates_w_names.c.ts.desc())
+                    .all()
+                )
+        else:
+            with self._session(session) as session:
+                return session.query(TaskRecord).\
+                    join(TaskEvent).\
+                    filter(TaskEvent.ts >= yesterday).\
+                    group_by(TaskRecord.id, TaskEvent.event_name, TaskEvent.ts).\
+                    order_by(TaskEvent.ts.desc()).\
+                    all()
 
     def find_all_runs(self, session=None):
         """
@@ -209,7 +244,7 @@ class TaskEvent(Base):
     id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True)
     task_id = sqlalchemy.Column(sqlalchemy.Integer, sqlalchemy.ForeignKey('tasks.id'), index=True)
     event_name = sqlalchemy.Column(sqlalchemy.String(20))
-    ts = sqlalchemy.Column(sqlalchemy.TIMESTAMP, index=True, nullable=False)
+    ts = sqlalchemy.Column(TS_TYPE, index=True, nullable=False)
 
     def __repr__(self):
         return "TaskEvent(task_id=%s, event_name=%s, ts=%s" % (self.task_id, self.event_name, self.ts)
